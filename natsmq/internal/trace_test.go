@@ -38,6 +38,16 @@ func TestHeaderCarrierGet(t *testing.T) {
 	}
 }
 
+func TestHeaderCarrierWithNilPointer(t *testing.T) {
+	carrier := NewHeaderCarrier(nil)
+
+	assert.Equal(t, "", carrier.Get("foo"))
+
+	carrier.Set("foo", "bar")
+
+	assert.Equal(t, []string{}, carrier.Keys())
+}
+
 func TestHeaderCarrierSet(t *testing.T) {
 	var headers nats.Header
 	carrier := NewHeaderCarrier(&headers)
