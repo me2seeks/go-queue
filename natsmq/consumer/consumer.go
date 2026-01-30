@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -126,33 +128,9 @@ func (cm *ConsumerManager) Start() {
 //
 //	error - non-nil error if creating the consumer or subscribing fails
 func (cm *ConsumerManager) createConsumer(ctx context.Context, cfg *ConsumerQueueConfig, stream jetstream.Stream) error {
-	var consumer jetstream.Consumer
-	var err error
-
-	// Create an ordered consumer or a standard consumer based on the configuration.
-	if cfg.ConsumerConfig.Ordered {
-		opts := jetstream.OrderedConsumerConfig{
-			FilterSubjects: cfg.ConsumerConfig.FilterSubjects,
-			DeliverPolicy:  jetstream.DeliverPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.DeliverPolicy),
-			OptStartSeq:    cfg.ConsumerConfig.OrderedConsumerOptions.OptStartSeq,
-			OptStartTime:   cfg.ConsumerConfig.OrderedConsumerOptions.OptStartTime,
-			ReplayPolicy:   jetstream.ReplayPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.ReplayPolicy),
-		}
-		consumer, err = stream.OrderedConsumer(ctx, opts)
-		if err != nil {
-			return fmt.Errorf("failed to create ordered consumer: %w", err)
-		}
-	} else {
-		consumer, err = stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-			Name:           cfg.ConsumerConfig.Name,
-			Durable:        cfg.ConsumerConfig.Durable,
-			Description:    cfg.ConsumerConfig.Description,
-			FilterSubjects: cfg.ConsumerConfig.FilterSubjects,
-			AckPolicy:      jetstream.AckPolicy(cfg.ConsumerConfig.AckPolicy),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to create standard consumer: %w", err)
-		}
+	consumer, err := cm.ensureConsumer(ctx, cfg, stream)
+	if err != nil {
+		return err
 	}
 
 	// Create consumer instances based on the specified number for the consumer queue. Each instance
@@ -161,7 +139,7 @@ func (cm *ConsumerManager) createConsumer(ctx context.Context, cfg *ConsumerQueu
 		log.Printf("Consumer [%s] instance [%d] with filterSubjects %v created successfully", cfg.ConsumerConfig.Name, i, cfg.ConsumerConfig.FilterSubjects)
 		switch cfg.Delivery.ConsumptionMethod {
 		case Consumer:
-			consumerCtx, err := cm.consumerSubscription(consumer, cfg)
+			consumerCtx, err := cm.consumerSubscription(ctx, stream, consumer, cfg)
 			if err != nil {
 				return fmt.Errorf("failed to subscribe to push messages: %w", err)
 			}
@@ -193,14 +171,172 @@ func (cm *ConsumerManager) createConsumer(ctx context.Context, cfg *ConsumerQueu
 //
 //	jetstream.ConsumeContext - context to manage the subscription lifecycle
 //	error                  - non-nil error if subscription fails
-func (cm *ConsumerManager) consumerSubscription(consumer jetstream.Consumer, cfg *ConsumerQueueConfig) (jetstream.ConsumeContext, error) {
-	consumerCtx, err := consumer.Consume(func(msg jetstream.Msg) {
-		cm.ackMessage(cfg, msg)
+func (cm *ConsumerManager) consumerSubscription(ctx context.Context, stream jetstream.Stream, consumer jetstream.Consumer, cfg *ConsumerQueueConfig) (jetstream.ConsumeContext, error) {
+	managed := &managedConsume{
+		stopCh: make(chan struct{}),
+	}
+	errCh := make(chan error, 1)
+
+	go func() {
+		backoff := time.Second
+		maxBackoff := 30 * time.Second
+		currentConsumer := consumer
+		for {
+			select {
+			case <-managed.stopCh:
+				return
+			default:
+			}
+
+			consumerCtx, err := currentConsumer.Consume(func(msg jetstream.Msg) {
+				cm.ackMessage(cfg, msg)
+			}, jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, err error) {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}))
+			if err != nil {
+				log.Printf("failed to subscribe to messages: %v", err)
+				select {
+				case <-managed.stopCh:
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < maxBackoff {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+				continue
+			}
+
+			managed.setCurrent(consumerCtx)
+			backoff = time.Second
+
+			select {
+			case <-managed.stopCh:
+				managed.stopCurrent()
+				return
+			case err := <-errCh:
+				log.Printf("consume error, restarting consumer %s: %v", cfg.ConsumerConfig.Name, err)
+				managed.stopCurrent()
+				if isRecoverableConsumerErr(err) {
+					rebuildCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					newConsumer, rebuildErr := cm.ensureConsumer(rebuildCtx, cfg, stream)
+					cancel()
+					if rebuildErr != nil {
+						log.Printf("rebuild consumer failed %s: %v", cfg.ConsumerConfig.Name, rebuildErr)
+					} else {
+						currentConsumer = newConsumer
+					}
+				}
+				select {
+				case <-managed.stopCh:
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < maxBackoff {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+			}
+		}
+	}()
+
+	return managed, nil
+}
+
+func (cm *ConsumerManager) ensureConsumer(ctx context.Context, cfg *ConsumerQueueConfig, stream jetstream.Stream) (jetstream.Consumer, error) {
+	// Create an ordered consumer or a standard consumer based on the configuration.
+	if cfg.ConsumerConfig.Ordered {
+		opts := jetstream.OrderedConsumerConfig{
+			FilterSubjects: cfg.ConsumerConfig.FilterSubjects,
+			DeliverPolicy:  jetstream.DeliverPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.DeliverPolicy),
+			OptStartSeq:    cfg.ConsumerConfig.OrderedConsumerOptions.OptStartSeq,
+			OptStartTime:   cfg.ConsumerConfig.OrderedConsumerOptions.OptStartTime,
+			ReplayPolicy:   jetstream.ReplayPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.ReplayPolicy),
+		}
+		consumer, err := stream.OrderedConsumer(ctx, opts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ordered consumer: %w", err)
+		}
+		return consumer, nil
+	}
+
+	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+		Name:           cfg.ConsumerConfig.Name,
+		Durable:        cfg.ConsumerConfig.Durable,
+		Description:    cfg.ConsumerConfig.Description,
+		FilterSubjects: cfg.ConsumerConfig.FilterSubjects,
+		AckPolicy:      jetstream.AckPolicy(cfg.ConsumerConfig.AckPolicy),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to subscribe to messages: %w", err)
+		return nil, fmt.Errorf("failed to create standard consumer: %w", err)
 	}
-	return consumerCtx, nil
+	return consumer, nil
+}
+
+func isRecoverableConsumerErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, nats.ErrNoResponders) {
+		return true
+	}
+	if errors.Is(err, jetstream.ErrConsumerDeleted) || errors.Is(err, jetstream.ErrConsumerNotFound) {
+		return true
+	}
+	return false
+}
+
+type managedConsume struct {
+	mu      sync.Mutex
+	current jetstream.ConsumeContext
+	stopCh  chan struct{}
+}
+
+func (m *managedConsume) Stop() {
+	m.close()
+	m.stopCurrent()
+}
+
+func (m *managedConsume) Drain() {
+	m.close()
+	m.mu.Lock()
+	if m.current != nil {
+		m.current.Drain()
+	}
+	m.mu.Unlock()
+}
+
+func (m *managedConsume) close() {
+	m.mu.Lock()
+	if m.stopCh != nil {
+		select {
+		case <-m.stopCh:
+		default:
+			close(m.stopCh)
+		}
+	}
+	m.mu.Unlock()
+}
+
+func (m *managedConsume) setCurrent(ctx jetstream.ConsumeContext) {
+	m.mu.Lock()
+	m.current = ctx
+	m.mu.Unlock()
+}
+
+func (m *managedConsume) stopCurrent() {
+	m.mu.Lock()
+	if m.current != nil {
+		m.current.Stop()
+	}
+	m.mu.Unlock()
 }
 
 // ackMessage processes a message using the user-provided handler and acknowledges the message if required.
