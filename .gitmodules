@@ -1,0 +1,6 @@
+[submodule ".github/ai-context"]
+	path = .github/ai-context
+	url = https://github.com/zeromicro/ai-context.git
+[submodule ".ai-context/zero-skills"]
+	path = .ai-context/zero-skills
+	url = https://github.com/zeromicro/zero-skills.git
