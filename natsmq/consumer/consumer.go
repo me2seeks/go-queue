@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/zeromicro/go-queue/natsmq/common"
 	"github.com/zeromicro/go-zero/core/queue"
-	"log"
 )
 
 // ConsumerManager manages consumer operations including NATS connection, JetStream stream initialization,
@@ -125,14 +126,23 @@ func (cm *ConsumerManager) createConsumer(ctx context.Context, cfg *ConsumerQueu
 	var consumer jetstream.Consumer
 	var err error
 
+	if err := validateConsumerConfig(cfg); err != nil {
+		return err
+	}
+
 	// Create an ordered consumer or a standard consumer based on the configuration.
 	if cfg.ConsumerConfig.Ordered {
 		opts := jetstream.OrderedConsumerConfig{
-			FilterSubjects: cfg.ConsumerConfig.FilterSubjects,
-			DeliverPolicy:  jetstream.DeliverPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.DeliverPolicy),
-			OptStartSeq:    cfg.ConsumerConfig.OrderedConsumerOptions.OptStartSeq,
-			OptStartTime:   cfg.ConsumerConfig.OrderedConsumerOptions.OptStartTime,
-			ReplayPolicy:   jetstream.ReplayPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.ReplayPolicy),
+			FilterSubjects:    cfg.ConsumerConfig.FilterSubjects,
+			DeliverPolicy:     jetstream.DeliverPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.DeliverPolicy),
+			OptStartSeq:       cfg.ConsumerConfig.OrderedConsumerOptions.OptStartSeq,
+			OptStartTime:      cfg.ConsumerConfig.OrderedConsumerOptions.OptStartTime,
+			ReplayPolicy:      jetstream.ReplayPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.ReplayPolicy),
+			InactiveThreshold: cfg.ConsumerConfig.OrderedConsumerOptions.InactiveThreshold,
+			HeadersOnly:       cfg.ConsumerConfig.OrderedConsumerOptions.HeadersOnly,
+			MaxResetAttempts:  cfg.ConsumerConfig.OrderedConsumerOptions.MaxResetAttempts,
+			Metadata:          cfg.ConsumerConfig.OrderedConsumerOptions.Metadata,
+			NamePrefix:        cfg.ConsumerConfig.OrderedConsumerOptions.NamePrefix,
 		}
 		consumer, err = stream.OrderedConsumer(ctx, opts)
 		if err != nil {
@@ -140,11 +150,39 @@ func (cm *ConsumerManager) createConsumer(ctx context.Context, cfg *ConsumerQueu
 		}
 	} else {
 		consumer, err = stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-			Name:           cfg.ConsumerConfig.Name,
-			Durable:        cfg.ConsumerConfig.Durable,
-			Description:    cfg.ConsumerConfig.Description,
-			FilterSubjects: cfg.ConsumerConfig.FilterSubjects,
-			AckPolicy:      jetstream.AckPolicy(cfg.ConsumerConfig.AckPolicy),
+			Name:               cfg.ConsumerConfig.Name,
+			Durable:            cfg.ConsumerConfig.Durable,
+			Description:        cfg.ConsumerConfig.Description,
+			DeliverPolicy:      jetstream.DeliverPolicy(cfg.ConsumerConfig.DeliverPolicy),
+			OptStartSeq:        cfg.ConsumerConfig.OptStartSeq,
+			OptStartTime:       cfg.ConsumerConfig.OptStartTime,
+			AckPolicy:          jetstream.AckPolicy(cfg.ConsumerConfig.AckPolicy),
+			AckWait:            cfg.ConsumerConfig.AckWait,
+			MaxDeliver:         cfg.ConsumerConfig.MaxDeliver,
+			BackOff:            cfg.ConsumerConfig.BackOff,
+			FilterSubject:      cfg.ConsumerConfig.FilterSubject,
+			ReplayPolicy:       jetstream.ReplayPolicy(cfg.ConsumerConfig.ReplayPolicy),
+			RateLimit:          cfg.ConsumerConfig.RateLimit,
+			SampleFrequency:    cfg.ConsumerConfig.SampleFrequency,
+			MaxWaiting:         cfg.ConsumerConfig.MaxWaiting,
+			MaxAckPending:      cfg.ConsumerConfig.MaxAckPending,
+			HeadersOnly:        cfg.ConsumerConfig.HeadersOnly,
+			MaxRequestBatch:    cfg.ConsumerConfig.MaxRequestBatch,
+			MaxRequestExpires:  cfg.ConsumerConfig.MaxRequestExpires,
+			MaxRequestMaxBytes: cfg.ConsumerConfig.MaxRequestMaxBytes,
+			InactiveThreshold:  cfg.ConsumerConfig.InactiveThreshold,
+			Replicas:           cfg.ConsumerConfig.Replicas,
+			MemoryStorage:      cfg.ConsumerConfig.MemoryStorage,
+			FilterSubjects:     cfg.ConsumerConfig.FilterSubjects,
+			Metadata:           cfg.ConsumerConfig.Metadata,
+			PauseUntil:         cfg.ConsumerConfig.PauseUntil,
+			PriorityPolicy:     jetstream.PriorityPolicy(cfg.ConsumerConfig.PriorityPolicy),
+			PinnedTTL:          cfg.ConsumerConfig.PinnedTTL,
+			PriorityGroups:     cfg.ConsumerConfig.PriorityGroups,
+			DeliverSubject:     cfg.ConsumerConfig.DeliverSubject,
+			DeliverGroup:       cfg.ConsumerConfig.DeliverGroup,
+			FlowControl:        cfg.ConsumerConfig.FlowControl,
+			IdleHeartbeat:      cfg.ConsumerConfig.IdleHeartbeat,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create standard consumer: %w", err)
@@ -197,6 +235,21 @@ func (cm *ConsumerManager) consumerSubscription(consumer jetstream.Consumer, cfg
 		return nil, fmt.Errorf("failed to subscribe to messages: %w", err)
 	}
 	return consumerCtx, nil
+}
+
+func validateConsumerConfig(cfg *ConsumerQueueConfig) error {
+	if cfg.ConsumerConfig.FilterSubject != "" && len(cfg.ConsumerConfig.FilterSubjects) > 0 {
+		return errors.New("filterSubject and filterSubjects are mutually exclusive")
+	}
+	if cfg.Delivery.ConsumptionMethod == Pull || cfg.Delivery.ConsumptionMethod == PullNoWait {
+		if cfg.ConsumerConfig.DeliverSubject != "" || cfg.ConsumerConfig.DeliverGroup != "" || cfg.ConsumerConfig.FlowControl || cfg.ConsumerConfig.IdleHeartbeat > 0 {
+			return errors.New("push consumer fields are not allowed for pull consumption")
+		}
+	}
+	if cfg.ConsumerConfig.MaxDeliver > 0 && len(cfg.ConsumerConfig.BackOff) > cfg.ConsumerConfig.MaxDeliver {
+		return errors.New("backOff length must be less than or equal to maxDeliver")
+	}
+	return nil
 }
 
 // ackMessage processes a message using the user-provided handler and acknowledges the message if required.
