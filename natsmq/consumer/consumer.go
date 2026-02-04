@@ -128,70 +128,13 @@ func (cm *ConsumerManager) Start() {
 //
 //	error - non-nil error if creating the consumer or subscribing fails
 func (cm *ConsumerManager) createConsumer(ctx context.Context, cfg *ConsumerQueueConfig, stream jetstream.Stream) error {
-	var consumer jetstream.Consumer
-	var err error
-
 	if err := validateConsumerConfig(cfg); err != nil {
 		return err
 	}
 
-	// Create an ordered consumer or a standard consumer based on the configuration.
-	if cfg.ConsumerConfig.Ordered {
-		opts := jetstream.OrderedConsumerConfig{
-			FilterSubjects:    cfg.ConsumerConfig.FilterSubjects,
-			DeliverPolicy:     jetstream.DeliverPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.DeliverPolicy),
-			OptStartSeq:       cfg.ConsumerConfig.OrderedConsumerOptions.OptStartSeq,
-			OptStartTime:      cfg.ConsumerConfig.OrderedConsumerOptions.OptStartTime,
-			ReplayPolicy:      jetstream.ReplayPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.ReplayPolicy),
-			InactiveThreshold: cfg.ConsumerConfig.OrderedConsumerOptions.InactiveThreshold,
-			HeadersOnly:       cfg.ConsumerConfig.OrderedConsumerOptions.HeadersOnly,
-			MaxResetAttempts:  cfg.ConsumerConfig.OrderedConsumerOptions.MaxResetAttempts,
-			Metadata:          cfg.ConsumerConfig.OrderedConsumerOptions.Metadata,
-			NamePrefix:        cfg.ConsumerConfig.OrderedConsumerOptions.NamePrefix,
-		}
-		consumer, err = stream.OrderedConsumer(ctx, opts)
-		if err != nil {
-			return fmt.Errorf("failed to create ordered consumer: %w", err)
-		}
-	} else {
-		consumer, err = stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-			Name:               cfg.ConsumerConfig.Name,
-			Durable:            cfg.ConsumerConfig.Durable,
-			Description:        cfg.ConsumerConfig.Description,
-			DeliverPolicy:      jetstream.DeliverPolicy(cfg.ConsumerConfig.DeliverPolicy),
-			OptStartSeq:        cfg.ConsumerConfig.OptStartSeq,
-			OptStartTime:       cfg.ConsumerConfig.OptStartTime,
-			AckPolicy:          jetstream.AckPolicy(cfg.ConsumerConfig.AckPolicy),
-			AckWait:            cfg.ConsumerConfig.AckWait,
-			MaxDeliver:         cfg.ConsumerConfig.MaxDeliver,
-			BackOff:            cfg.ConsumerConfig.BackOff,
-			FilterSubject:      cfg.ConsumerConfig.FilterSubject,
-			ReplayPolicy:       jetstream.ReplayPolicy(cfg.ConsumerConfig.ReplayPolicy),
-			RateLimit:          cfg.ConsumerConfig.RateLimit,
-			SampleFrequency:    cfg.ConsumerConfig.SampleFrequency,
-			MaxWaiting:         cfg.ConsumerConfig.MaxWaiting,
-			MaxAckPending:      cfg.ConsumerConfig.MaxAckPending,
-			HeadersOnly:        cfg.ConsumerConfig.HeadersOnly,
-			MaxRequestBatch:    cfg.ConsumerConfig.MaxRequestBatch,
-			MaxRequestExpires:  cfg.ConsumerConfig.MaxRequestExpires,
-			MaxRequestMaxBytes: cfg.ConsumerConfig.MaxRequestMaxBytes,
-			InactiveThreshold:  cfg.ConsumerConfig.InactiveThreshold,
-			Replicas:           cfg.ConsumerConfig.Replicas,
-			MemoryStorage:      cfg.ConsumerConfig.MemoryStorage,
-			FilterSubjects:     cfg.ConsumerConfig.FilterSubjects,
-			Metadata:           cfg.ConsumerConfig.Metadata,
-			PauseUntil:         cfg.ConsumerConfig.PauseUntil,
-			PriorityPolicy:     jetstream.PriorityPolicy(cfg.ConsumerConfig.PriorityPolicy),
-			PinnedTTL:          cfg.ConsumerConfig.PinnedTTL,
-			PriorityGroups:     cfg.ConsumerConfig.PriorityGroups,
-			DeliverSubject:     cfg.ConsumerConfig.DeliverSubject,
-			DeliverGroup:       cfg.ConsumerConfig.DeliverGroup,
-			FlowControl:        cfg.ConsumerConfig.FlowControl,
-			IdleHeartbeat:      cfg.ConsumerConfig.IdleHeartbeat,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to create standard consumer: %w", err)
-		}
+	consumer, err := cm.createOrUpdateConsumer(ctx, cfg, stream)
+	if err != nil {
+		return err
 	}
 
 	// Create consumer instances based on the specified number for the consumer queue. Each instance
@@ -285,7 +228,7 @@ func (cm *ConsumerManager) consumerSubscription(ctx context.Context, stream jets
 				managed.stopCurrent()
 				if isRecoverableConsumerErr(err) {
 					rebuildCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-					newConsumer, rebuildErr := cm.ensureConsumer(rebuildCtx, cfg, stream)
+					newConsumer, rebuildErr := cm.createOrUpdateConsumer(rebuildCtx, cfg, stream)
 					cancel()
 					if rebuildErr != nil {
 						log.Printf("rebuild consumer failed %s: %v", cfg.ConsumerConfig.Name, rebuildErr)
@@ -311,15 +254,20 @@ func (cm *ConsumerManager) consumerSubscription(ctx context.Context, stream jets
 	return managed, nil
 }
 
-func (cm *ConsumerManager) ensureConsumer(ctx context.Context, cfg *ConsumerQueueConfig, stream jetstream.Stream) (jetstream.Consumer, error) {
+func (cm *ConsumerManager) createOrUpdateConsumer(ctx context.Context, cfg *ConsumerQueueConfig, stream jetstream.Stream) (jetstream.Consumer, error) {
 	// Create an ordered consumer or a standard consumer based on the configuration.
 	if cfg.ConsumerConfig.Ordered {
 		opts := jetstream.OrderedConsumerConfig{
-			FilterSubjects: cfg.ConsumerConfig.FilterSubjects,
-			DeliverPolicy:  jetstream.DeliverPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.DeliverPolicy),
-			OptStartSeq:    cfg.ConsumerConfig.OrderedConsumerOptions.OptStartSeq,
-			OptStartTime:   cfg.ConsumerConfig.OrderedConsumerOptions.OptStartTime,
-			ReplayPolicy:   jetstream.ReplayPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.ReplayPolicy),
+			FilterSubjects:    cfg.ConsumerConfig.FilterSubjects,
+			DeliverPolicy:     jetstream.DeliverPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.DeliverPolicy),
+			OptStartSeq:       cfg.ConsumerConfig.OrderedConsumerOptions.OptStartSeq,
+			OptStartTime:      cfg.ConsumerConfig.OrderedConsumerOptions.OptStartTime,
+			ReplayPolicy:      jetstream.ReplayPolicy(cfg.ConsumerConfig.OrderedConsumerOptions.ReplayPolicy),
+			InactiveThreshold: cfg.ConsumerConfig.OrderedConsumerOptions.InactiveThreshold,
+			HeadersOnly:       cfg.ConsumerConfig.OrderedConsumerOptions.HeadersOnly,
+			MaxResetAttempts:  cfg.ConsumerConfig.OrderedConsumerOptions.MaxResetAttempts,
+			Metadata:          cfg.ConsumerConfig.OrderedConsumerOptions.Metadata,
+			NamePrefix:        cfg.ConsumerConfig.OrderedConsumerOptions.NamePrefix,
 		}
 		consumer, err := stream.OrderedConsumer(ctx, opts)
 		if err != nil {
@@ -329,11 +277,39 @@ func (cm *ConsumerManager) ensureConsumer(ctx context.Context, cfg *ConsumerQueu
 	}
 
 	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Name:           cfg.ConsumerConfig.Name,
-		Durable:        cfg.ConsumerConfig.Durable,
-		Description:    cfg.ConsumerConfig.Description,
-		FilterSubjects: cfg.ConsumerConfig.FilterSubjects,
-		AckPolicy:      jetstream.AckPolicy(cfg.ConsumerConfig.AckPolicy),
+		Name:               cfg.ConsumerConfig.Name,
+		Durable:            cfg.ConsumerConfig.Durable,
+		Description:        cfg.ConsumerConfig.Description,
+		DeliverPolicy:      jetstream.DeliverPolicy(cfg.ConsumerConfig.DeliverPolicy),
+		OptStartSeq:        cfg.ConsumerConfig.OptStartSeq,
+		OptStartTime:       cfg.ConsumerConfig.OptStartTime,
+		AckPolicy:          jetstream.AckPolicy(cfg.ConsumerConfig.AckPolicy),
+		AckWait:            cfg.ConsumerConfig.AckWait,
+		MaxDeliver:         cfg.ConsumerConfig.MaxDeliver,
+		BackOff:            cfg.ConsumerConfig.BackOff,
+		FilterSubject:      cfg.ConsumerConfig.FilterSubject,
+		ReplayPolicy:       jetstream.ReplayPolicy(cfg.ConsumerConfig.ReplayPolicy),
+		RateLimit:          cfg.ConsumerConfig.RateLimit,
+		SampleFrequency:    cfg.ConsumerConfig.SampleFrequency,
+		MaxWaiting:         cfg.ConsumerConfig.MaxWaiting,
+		MaxAckPending:      cfg.ConsumerConfig.MaxAckPending,
+		HeadersOnly:        cfg.ConsumerConfig.HeadersOnly,
+		MaxRequestBatch:    cfg.ConsumerConfig.MaxRequestBatch,
+		MaxRequestExpires:  cfg.ConsumerConfig.MaxRequestExpires,
+		MaxRequestMaxBytes: cfg.ConsumerConfig.MaxRequestMaxBytes,
+		InactiveThreshold:  cfg.ConsumerConfig.InactiveThreshold,
+		Replicas:           cfg.ConsumerConfig.Replicas,
+		MemoryStorage:      cfg.ConsumerConfig.MemoryStorage,
+		FilterSubjects:     cfg.ConsumerConfig.FilterSubjects,
+		Metadata:           cfg.ConsumerConfig.Metadata,
+		PauseUntil:         cfg.ConsumerConfig.PauseUntil,
+		PriorityPolicy:     jetstream.PriorityPolicy(cfg.ConsumerConfig.PriorityPolicy),
+		PinnedTTL:          cfg.ConsumerConfig.PinnedTTL,
+		PriorityGroups:     cfg.ConsumerConfig.PriorityGroups,
+		DeliverSubject:     cfg.ConsumerConfig.DeliverSubject,
+		DeliverGroup:       cfg.ConsumerConfig.DeliverGroup,
+		FlowControl:        cfg.ConsumerConfig.FlowControl,
+		IdleHeartbeat:      cfg.ConsumerConfig.IdleHeartbeat,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create standard consumer: %w", err)
